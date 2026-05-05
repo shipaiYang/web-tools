@@ -1,0 +1,13 @@
+{
+  "name": "dev-toolbox-workers",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A lightweight developer toolbox that runs on Cloudflare Workers.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
