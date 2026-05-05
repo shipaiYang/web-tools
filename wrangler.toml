@@ -1,4 +1,4 @@
-name = "dev-toolbox-workers"
+name = "web-tools"
 main = "src/worker.mjs"
 compatibility_date = "2026-05-05"
 
