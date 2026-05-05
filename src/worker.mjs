@@ -5,7 +5,8 @@ const SITE_DESCRIPTION =
 const SITE_KEYWORDS =
   "开发工具,在线工具,JSON格式化,时间戳转换,Base64,URL编码,JWT解析,哈希生成,UUID生成,命名格式转换,developer tools,json formatter,timestamp converter";
 const DEPLOYED_AT = "2026-05-05";
-const CONTACT_EMAIL = "your-email@example.com";
+const CONTACT_EMAIL = "openai@paiai.ccwu.cc";
+const ADS_TXT = "google.com, pub-7928012653439229, DIRECT, f08c47fec0942fa0";
 
 function escapeHtml(value) {
   return value
@@ -1862,6 +1863,12 @@ export default {
 
     if (url.pathname === "/robots.txt") {
       return new Response(renderRobots(origin), {
+        headers: responseHeaders("text/plain; charset=UTF-8")
+      });
+    }
+
+    if (url.pathname === "/ads.txt") {
+      return new Response(ADS_TXT, {
         headers: responseHeaders("text/plain; charset=UTF-8")
       });
     }
