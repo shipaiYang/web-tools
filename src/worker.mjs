@@ -953,6 +953,7 @@ function renderHtml(origin) {
                 <a href="#json-tool">JSON 格式化</a>
                 <a href="#timestamp-tool">时间戳转换</a>
                 <a href="#jwt-tool">JWT 解析</a>
+                <a href="#java-bean-tool">Java Bean 转 JSON</a>
                 <a href="#faq">FAQ</a>
                 <a href="/about.html">About</a>
                 <a href="/privacy.html">Privacy</a>
@@ -1006,6 +1007,39 @@ function renderHtml(origin) {
                 <button id="json-minify">压缩</button>
                 <button id="json-validate">校验</button>
                 <button id="json-clear">清空</button>
+              </div>
+            </div>
+          </article>
+
+          <article class="tool" id="java-bean-tool" data-category="data" data-span="full">
+            <div class="tool-head">
+              <div>
+                <h3>Java Bean 转 JSON</h3>
+                <p>支持 Java 类字段定义，以及常见的 <code>toString()</code> 或调试输出，例如 <code>User(id=1, name="Alice")</code>。</p>
+              </div>
+              <span class="tool-tag">Data</span>
+            </div>
+            <div class="tool-body">
+              <div class="tool-grid">
+                <div>
+                  <label for="bean-input">输入</label>
+                  <textarea id="bean-input" spellcheck="false" placeholder='public class User {
+  private Long id;
+  private String name;
+  private List&lt;String&gt; tags;
+}'></textarea>
+                </div>
+                <div>
+                  <div class="split-head">
+                    <label for="bean-output">输出</label>
+                    <button class="copy-button" data-copy="bean-output">复制结果</button>
+                  </div>
+                  <textarea id="bean-output" spellcheck="false" readonly></textarea>
+                </div>
+              </div>
+              <div class="controls">
+                <button class="primary" id="bean-convert">转换</button>
+                <button id="bean-clear">清空</button>
               </div>
             </div>
           </article>
@@ -1342,6 +1376,526 @@ function renderHtml(origin) {
         setValue("json-output", "");
       });
 
+      function stripJavaComments(input) {
+        return input
+          .replace(/\/\*[\s\S]*?\*\//g, "")
+          .replace(/\/\/.*$/gm, "");
+      }
+
+      function defaultValueForJavaType(rawType) {
+        const normalized = rawType.replace(/\s+/g, "");
+        const simpleType = normalized
+          .split(".")
+          .pop()
+          .replace(/<.*>/, "");
+
+        if (/\[\]$/.test(normalized)) {
+          return [];
+        }
+        if (/^(String|CharSequence|Character|char|LocalDate|LocalDateTime|LocalTime|OffsetDateTime|ZonedDateTime|Instant|Date|Timestamp|UUID|URI|URL)$/.test(simpleType)) {
+          return "";
+        }
+        if (/^(boolean|Boolean)$/.test(simpleType)) {
+          return false;
+        }
+        if (/^(byte|Byte|short|Short|int|Integer|long|Long|float|Float|double|Double|BigDecimal|BigInteger)$/.test(simpleType)) {
+          return 0;
+        }
+        if (/^(List|ArrayList|LinkedList|Set|HashSet|LinkedHashSet|Collection|Iterable|Deque|Queue|Vector)$/.test(simpleType)) {
+          return [];
+        }
+        if (/^(Map|HashMap|LinkedHashMap|TreeMap|ConcurrentHashMap|Hashtable|Properties)$/.test(simpleType)) {
+          return {};
+        }
+        if (/^Optional$/.test(simpleType)) {
+          return null;
+        }
+        return {};
+      }
+
+      function parseJavaBeanDefinition(source) {
+        const fieldObject = {};
+        const lines = stripJavaComments(source).split(/\r?\n/);
+
+        lines.forEach(function (line) {
+          const trimmed = line.trim();
+          if (
+            !trimmed ||
+            trimmed.startsWith("@") ||
+            /\b(class|interface|enum|record)\b/.test(trimmed) ||
+            /\b(static|native|synchronized|abstract)\b/.test(trimmed) ||
+            trimmed.indexOf("(") !== -1
+          ) {
+            return;
+          }
+
+          const match = trimmed.match(/^(?:(?:public|protected|private)\s+)?(?:(?:final|transient|volatile)\s+)*(?<type>[\w$.<>\[\], ?]+?)\s+(?<names>[A-Za-z_]\w*(?:\s*=\s*[^,;]+)?(?:\s*,\s*[A-Za-z_]\w*(?:\s*=\s*[^,;]+)?)*)\s*;$/);
+          if (!match || !match.groups) {
+            return;
+          }
+
+          const type = match.groups.type.trim();
+          match.groups.names.split(",").forEach(function (namePart) {
+            const fieldName = namePart.split("=")[0].trim();
+            if (!fieldName || fieldName === "serialVersionUID") {
+              return;
+            }
+            fieldObject[fieldName] = defaultValueForJavaType(type);
+          });
+        });
+
+        return Object.keys(fieldObject).length ? fieldObject : null;
+      }
+
+      function readBeanWhitespace(state) {
+        let hadNewline = false;
+        while (state.index < state.input.length) {
+          const char = state.input[state.index];
+          if (!/\s/.test(char)) {
+            break;
+          }
+          if (char === "\n" || char === "\r") {
+            hadNewline = true;
+          }
+          state.index += 1;
+        }
+        return hadNewline;
+      }
+
+      function beanError(state, message) {
+        return new Error(message + " at position " + state.index);
+      }
+
+      function isBeanNameStart(char) {
+        return /[A-Za-z_$]/.test(char || "");
+      }
+
+      function isBeanNameChar(char) {
+        return /[A-Za-z0-9_.$]/.test(char || "");
+      }
+
+      function scanBeanNamedObject(state) {
+        const input = state.input;
+        let cursor = state.index;
+        if (!isBeanNameStart(input[cursor])) {
+          return null;
+        }
+        cursor += 1;
+        while (cursor < input.length && isBeanNameChar(input[cursor])) {
+          cursor += 1;
+        }
+        const name = input.slice(state.index, cursor);
+        while (cursor < input.length && /\s/.test(input[cursor])) {
+          cursor += 1;
+        }
+        const open = input[cursor];
+        if (open !== "(" && open !== "{") {
+          return null;
+        }
+        return {
+          name: name,
+          afterName: cursor,
+          close: open === "(" ? ")" : "}"
+        };
+      }
+
+      function looksLikeBeanEntries(state, closeChar) {
+        const input = state.input;
+        let cursor = state.index;
+        let quote = "";
+        let depth = 0;
+
+        while (cursor < input.length) {
+          const char = input[cursor];
+          if (quote) {
+            if (char === "\\") {
+              cursor += 2;
+              continue;
+            }
+            if (char === quote) {
+              quote = "";
+            }
+            cursor += 1;
+            continue;
+          }
+
+          if (char === '"' || char === "'") {
+            quote = char;
+            cursor += 1;
+            continue;
+          }
+
+          if (char === "[" || char === "{" || char === "(") {
+            depth += 1;
+            cursor += 1;
+            continue;
+          }
+
+          if (char === "]" || char === "}" || char === ")") {
+            if (depth === 0) {
+              break;
+            }
+            depth -= 1;
+            cursor += 1;
+            continue;
+          }
+
+          if (depth === 0 && (char === "=" || char === ":")) {
+            if (char === ":" && input.slice(cursor, cursor + 3) === "://") {
+              return false;
+            }
+            return true;
+          }
+
+          if (
+            depth === 0 &&
+            (char === "," || char === "\n" || char === "\r" || (closeChar && char === closeChar))
+          ) {
+            return false;
+          }
+
+          cursor += 1;
+        }
+
+        return false;
+      }
+
+      function parseBeanQuotedString(state) {
+        const quote = state.input[state.index];
+        let value = "";
+        state.index += 1;
+
+        while (state.index < state.input.length) {
+          const char = state.input[state.index];
+          if (char === "\\") {
+            const next = state.input[state.index + 1];
+            if (next === "n") {
+              value += "\n";
+            } else if (next === "r") {
+              value += "\r";
+            } else if (next === "t") {
+              value += "\t";
+            } else if (next === "b") {
+              value += "\b";
+            } else if (next === "f") {
+              value += "\f";
+            } else if (next === "u" && /^[0-9a-fA-F]{4}$/.test(state.input.slice(state.index + 2, state.index + 6))) {
+              value += String.fromCharCode(parseInt(state.input.slice(state.index + 2, state.index + 6), 16));
+              state.index += 4;
+            } else {
+              value += next || "";
+            }
+            state.index += 2;
+            continue;
+          }
+          if (char === quote) {
+            state.index += 1;
+            return value;
+          }
+          value += char;
+          state.index += 1;
+        }
+
+        throw beanError(state, "Unterminated string");
+      }
+
+      function coerceBeanToken(token) {
+        if (!token) {
+          return "";
+        }
+        if (/^null$/i.test(token)) {
+          return null;
+        }
+        if (/^true$/i.test(token)) {
+          return true;
+        }
+        if (/^false$/i.test(token)) {
+          return false;
+        }
+        if (/^[+-]?\d+[lL]$/.test(token)) {
+          return Number(token.slice(0, -1));
+        }
+        if (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?[dDfF]?$/.test(token)) {
+          return Number(token.replace(/[dDfF]$/, ""));
+        }
+        return token;
+      }
+
+      function parseBeanBareToken(state, terminators) {
+        const start = state.index;
+        let quote = "";
+        let depth = 0;
+
+        while (state.index < state.input.length) {
+          const char = state.input[state.index];
+          if (quote) {
+            if (char === "\\") {
+              state.index += 2;
+              continue;
+            }
+            if (char === quote) {
+              quote = "";
+            }
+            state.index += 1;
+            continue;
+          }
+
+          if (char === '"' || char === "'") {
+            quote = char;
+            state.index += 1;
+            continue;
+          }
+
+          if (char === "[" || char === "{" || char === "(") {
+            depth += 1;
+            state.index += 1;
+            continue;
+          }
+
+          if (char === "]" || char === "}" || char === ")") {
+            if (depth === 0 && terminators.indexOf(char) !== -1) {
+              break;
+            }
+            depth = Math.max(depth - 1, 0);
+            state.index += 1;
+            continue;
+          }
+
+          if (depth === 0 && terminators.indexOf(char) !== -1) {
+            break;
+          }
+
+          state.index += 1;
+        }
+
+        return coerceBeanToken(state.input.slice(start, state.index).trim());
+      }
+
+      function parseBeanKey(state, closeChar) {
+        readBeanWhitespace(state);
+        if (state.input[state.index] === '"' || state.input[state.index] === "'") {
+          return parseBeanQuotedString(state);
+        }
+
+        const start = state.index;
+        while (state.index < state.input.length) {
+          const char = state.input[state.index];
+          if (
+            char === "=" ||
+            char === ":" ||
+            char === "," ||
+            char === "\n" ||
+            char === "\r" ||
+            (closeChar && char === closeChar)
+          ) {
+            break;
+          }
+          state.index += 1;
+        }
+
+        const key = state.input.slice(start, state.index).trim();
+        if (!key) {
+          throw beanError(state, "Invalid key");
+        }
+        return key;
+      }
+
+      function parseBeanEntry(state, closeChar) {
+        const key = parseBeanKey(state, closeChar);
+        readBeanWhitespace(state);
+        const separator = state.input[state.index];
+        if (separator !== "=" && separator !== ":") {
+          throw beanError(state, "Expected '=' or ':'");
+        }
+        state.index += 1;
+        return {
+          key: key,
+          value: parseBeanValue(state, closeChar)
+        };
+      }
+
+      function parseBeanEntries(state, closeChar) {
+        const result = {};
+        readBeanWhitespace(state);
+
+        if (closeChar && state.input[state.index] === closeChar) {
+          state.index += 1;
+          return result;
+        }
+
+        while (state.index < state.input.length) {
+          const entry = parseBeanEntry(state, closeChar);
+          result[entry.key] = entry.value;
+
+          const hadNewline = readBeanWhitespace(state);
+          const next = state.input[state.index];
+
+          if (next === ",") {
+            state.index += 1;
+            readBeanWhitespace(state);
+            if (closeChar && state.input[state.index] === closeChar) {
+              state.index += 1;
+              return result;
+            }
+            continue;
+          }
+
+          if (closeChar && next === closeChar) {
+            state.index += 1;
+            return result;
+          }
+
+          if (!closeChar && state.index >= state.input.length) {
+            return result;
+          }
+
+          if (hadNewline) {
+            continue;
+          }
+
+          throw beanError(state, "Expected a separator");
+        }
+
+        if (closeChar) {
+          throw beanError(state, "Missing closing '" + closeChar + "'");
+        }
+        return result;
+      }
+
+      function parseBeanList(state, closeChar) {
+        const values = [];
+        readBeanWhitespace(state);
+
+        if (state.input[state.index] === closeChar) {
+          state.index += 1;
+          return values;
+        }
+
+        while (state.index < state.input.length) {
+          values.push(parseBeanValue(state, closeChar));
+
+          const hadNewline = readBeanWhitespace(state);
+          const next = state.input[state.index];
+
+          if (next === ",") {
+            state.index += 1;
+            readBeanWhitespace(state);
+            if (state.input[state.index] === closeChar) {
+              state.index += 1;
+              return values;
+            }
+            continue;
+          }
+
+          if (next === closeChar) {
+            state.index += 1;
+            return values;
+          }
+
+          if (hadNewline) {
+            continue;
+          }
+
+          throw beanError(state, "Expected a separator");
+        }
+
+        throw beanError(state, "Missing closing '" + closeChar + "'");
+      }
+
+      function parseBeanValue(state, closeChar) {
+        readBeanWhitespace(state);
+        const char = state.input[state.index];
+
+        if (!char) {
+          throw beanError(state, "Unexpected end of input");
+        }
+        if (char === '"' || char === "'") {
+          return parseBeanQuotedString(state);
+        }
+        if (char === "[") {
+          state.index += 1;
+          return parseBeanList(state, "]");
+        }
+        if (char === "{") {
+          state.index += 1;
+          if (looksLikeBeanEntries(state, "}")) {
+            return parseBeanEntries(state, "}");
+          }
+          return parseBeanList(state, "}");
+        }
+
+        const namedObject = scanBeanNamedObject(state);
+        if (namedObject) {
+          state.index = namedObject.afterName + 1;
+          return parseBeanEntries(state, namedObject.close);
+        }
+
+        const terminators = closeChar ? [",", closeChar, "\n", "\r"] : [",", "\n", "\r"];
+        return parseBeanBareToken(state, terminators);
+      }
+
+      function parseBeanText(source) {
+        const state = {
+          input: source.trim(),
+          index: 0
+        };
+
+        if (!state.input) {
+          throw new Error("请输入 Java Bean 文本");
+        }
+
+        let result;
+        readBeanWhitespace(state);
+
+        if (state.input[state.index] === "[") {
+          state.index += 1;
+          result = parseBeanList(state, "]");
+        } else if (state.input[state.index] === "{") {
+          state.index += 1;
+          result = looksLikeBeanEntries(state, "}") ? parseBeanEntries(state, "}") : parseBeanList(state, "}");
+        } else if (scanBeanNamedObject(state)) {
+          const namedObject = scanBeanNamedObject(state);
+          state.index = namedObject.afterName + 1;
+          result = parseBeanEntries(state, namedObject.close);
+        } else if (looksLikeBeanEntries(state, null)) {
+          result = parseBeanEntries(state, null);
+        } else {
+          result = parseBeanBareToken(state, []);
+        }
+
+        readBeanWhitespace(state);
+        if (state.index !== state.input.length) {
+          throw beanError(state, "Unexpected token");
+        }
+        return result;
+      }
+
+      function convertJavaBeanToJson() {
+        const source = $("bean-input").value.trim();
+        if (!source) {
+          setValue("bean-output", "");
+          showToast("请输入 Java Bean 内容");
+          return;
+        }
+
+        try {
+          const fromDefinition = parseJavaBeanDefinition(source);
+          const result = fromDefinition || parseBeanText(source);
+          setValue("bean-output", JSON.stringify(result, null, 2));
+          showToast("转换完成");
+        } catch (error) {
+          setValue("bean-output", String(error.message || error));
+          showToast("转换失败");
+        }
+      }
+
+      $("bean-convert").addEventListener("click", convertJavaBeanToJson);
+
+      $("bean-clear").addEventListener("click", function () {
+        setValue("bean-input", "");
+        setValue("bean-output", "");
+      });
+
       function dateToLocalInput(date) {
         const offset = date.getTimezoneOffset() * 60000;
         const local = new Date(date.getTime() - offset);
@@ -1571,6 +2125,15 @@ function renderHtml(origin) {
           count: 8
         }));
         setValue("base64-input", "开发辅助工具页");
+        setValue("bean-input", [
+          "public class UserProfile {",
+          "  private Long id;",
+          "  private String name;",
+          "  private Boolean active;",
+          "  private List<String> tags;",
+          "  private Address address;",
+          "}"
+        ].join("\n"));
         setValue("url-input", "https://example.com/callback?from=dev toolbox&lang=zh-CN");
         setValue("hash-input", "dev-toolbox");
         setValue("case-input", "user_profile_name");
@@ -1582,6 +2145,7 @@ function renderHtml(origin) {
 
       fillSamples();
       $("json-format").click();
+      $("bean-convert").click();
       $("uuid-generate").click();
       $("hash-generate").click();
     </script>
@@ -1834,7 +2398,7 @@ function renderOgSvg() {
   <rect x="70" y="404" width="180" height="66" rx="18" fill="#ffffff" opacity="0.9" />
   <rect x="270" y="404" width="180" height="66" rx="18" fill="#ffffff" opacity="0.9" />
   <rect x="470" y="404" width="180" height="66" rx="18" fill="#ffffff" opacity="0.9" />
-  <text x="108" y="447" fill="#1e2830" font-size="28" font-family="IBM Plex Mono, monospace">8 tools</text>
+  <text x="108" y="447" fill="#1e2830" font-size="28" font-family="IBM Plex Mono, monospace">9 tools</text>
   <text x="302" y="447" fill="#1e2830" font-size="28" font-family="IBM Plex Mono, monospace">5 groups</text>
   <text x="510" y="447" fill="#1e2830" font-size="28" font-family="IBM Plex Mono, monospace">0 login</text>
 </svg>`;

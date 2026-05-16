@@ -134,9 +134,10 @@ Good use cases:
 
 ### Features
 
-The project currently includes 8 developer utilities:
+The project currently includes 9 developer utilities:
 
 - JSON format / minify / validate
+- Java Bean 转 JSON
 - Unix timestamp and local datetime conversion
 - Base64 encode / decode
 - URL encode / decode
